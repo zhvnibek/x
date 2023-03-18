@@ -69,7 +69,7 @@ class Model:
     """
     input_size = 512
     batch_size = 1
-    ckpt_path = '/home/user/Desktop/projects/victara/x/src/fegan/ckpt/SC-FEGAN.ckpt'
+    ckpt_path = 'fegan/ckpt/SC-FEGAN.ckpt'
 
     sess = None
 
