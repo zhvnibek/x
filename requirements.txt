@@ -1,5 +1,5 @@
 tensorflow==1.13.1
-opencv-python
+opencv-python-headless
 Pillow
 numpy
 pandas
