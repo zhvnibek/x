@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.framework.python.ops import add_arg_scope
@@ -167,6 +169,8 @@ class Model:
         self.sess.run(init_op)
         vars_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
         assign_ops = []
+        print(f'Loading model from {self.ckpt_path}...')
+        print(os.getcwd())
         for var in vars_list:
             var_value = tf.contrib.framework.load_variable(self.ckpt_path, var.name)
             assign_ops.append(tf.assign(var, var_value))
