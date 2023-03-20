@@ -170,7 +170,6 @@ class Model:
         vars_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
         assign_ops = []
         print(f'Loading model from {self.ckpt_path}...')
-        print(os.getcwd())
         for var in vars_list:
             var_value = tf.contrib.framework.load_variable(self.ckpt_path, var.name)
             assign_ops.append(tf.assign(var, var_value))
