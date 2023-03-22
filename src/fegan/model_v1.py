@@ -1,3 +1,7 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.contrib.framework.python.ops import add_arg_scope
+
 """
     The gate convolution is made with reference to Deepfillv1 (https://github.com/JiahuiYu/generative_inpainting)
 
@@ -8,31 +12,18 @@
 
     https://github.com/nipponjo/deepfillv2-pytorch (latest)
 
-
-    Migrated from tf v1 to tf v2: https://www.tensorflow.org/guide/migrate/upgrade
 """
 
-import numpy as np
-import tensorflow as tf
 
-from config import CONFIG
-
-# https://stackoverflow.com/questions/57932584/equivalent-of-from-tensorflow-contrib-framework-python-ops-import-arg-scope-in-t
-# from tensorflow.contrib.framework.python.ops import add_arg_scope
-
-
-# https://stackoverflow.com/questions/56561734/runtimeerror-tf-placeholder-is-not-compatible-with-eager-execution
-tf.compat.v1.disable_eager_execution()
-
-
+@add_arg_scope
 def gate_conv(x_in, cnum, ksize, stride=1, rate=1, name='conv',
               padding='SAME', activation='leaky_relu', use_lrn=True):
     assert padding in ['SYMMETRIC', 'SAME', 'REFELECT']
     if padding == 'SYMMETRIC' or padding == 'REFELECT':
         p = int(rate * (ksize - 1) / 2)
-        x = tf.pad(tensor=x_in, paddings=[[0, 0], [p, p], [p, p], [0, 0]], mode=padding)
+        x = tf.pad(x_in, [[0, 0], [p, p], [p, p], [0, 0]], mode=padding)
         padding = 'VALID'
-    x = tf.compat.v1.layers.conv2d(
+    x = tf.layers.conv2d(
         x_in, cnum, ksize, stride, dilation_rate=rate,
         activation=None, padding=padding, name=name)
     if use_lrn:
@@ -40,7 +31,7 @@ def gate_conv(x_in, cnum, ksize, stride=1, rate=1, name='conv',
     if activation == 'leaky_relu':
         x = tf.nn.leaky_relu(x)
 
-    g = tf.compat.v1.layers.conv2d(
+    g = tf.layers.conv2d(
         x_in, cnum, ksize, stride, dilation_rate=rate,
         activation=tf.nn.sigmoid, padding=padding, name=name + '_g')
 
@@ -48,23 +39,23 @@ def gate_conv(x_in, cnum, ksize, stride=1, rate=1, name='conv',
     return x, g
 
 
+@add_arg_scope
 def gate_deconv(input_, output_shape, k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02, name="deconv"):
-    with tf.compat.v1.variable_scope(name):
+    with tf.variable_scope(name):
         # filter : [height, width, output_channels, in_channels]
-        w = tf.compat.v1.get_variable('w', [k_h, k_w, output_shape[-1], input_.get_shape()[-1]],
-                                      initializer=tf.compat.v1.random_normal_initializer(stddev=stddev))
+        w = tf.get_variable('w', [k_h, k_w, output_shape[-1], input_.get_shape()[-1]],
+                            initializer=tf.random_normal_initializer(stddev=stddev))
 
         deconv = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
                                         strides=[1, d_h, d_w, 1])
 
-        biases = tf.compat.v1.get_variable('biases1', [output_shape[-1]],
-                                           initializer=tf.compat.v1.constant_initializer(0.0))
+        biases = tf.get_variable('biases1', [output_shape[-1]], initializer=tf.constant_initializer(0.0))
         deconv = tf.reshape(tf.nn.bias_add(deconv, biases), deconv.get_shape())
         deconv = tf.nn.leaky_relu(deconv)
 
         g = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
                                    strides=[1, d_h, d_w, 1])
-        b = tf.compat.v1.get_variable('biases2', [output_shape[-1]], initializer=tf.compat.v1.constant_initializer(0.0))
+        b = tf.get_variable('biases2', [output_shape[-1]], initializer=tf.constant_initializer(0.0))
         g = tf.reshape(tf.nn.bias_add(g, b), deconv.get_shape())
         g = tf.nn.sigmoid(deconv)
 
@@ -76,9 +67,9 @@ def gate_deconv(input_, output_shape, k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02, n
 class Model:
     """
     """
-    input_size = CONFIG.model.input_size
-    batch_size = CONFIG.model.batch_size
-    ckpt_path = CONFIG.model.ckpt_path
+    input_size = 512
+    batch_size = 1
+    ckpt_path = 'src/fegan/ckpt/SC-FEGAN.ckpt'
 
     sess = None
 
@@ -93,11 +84,11 @@ class Model:
 
         self.dtype = tf.float32
 
-        self.images = tf.compat.v1.placeholder(self.dtype, [self.batch_size] + image_dims, name='real_images')
-        self.sketches = tf.compat.v1.placeholder(self.dtype, [self.batch_size] + sk_dims, name='sketches')
-        self.color = tf.compat.v1.placeholder(self.dtype, [self.batch_size] + color_dims, name='color')
-        self.masks = tf.compat.v1.placeholder(self.dtype, [self.batch_size] + masks_dims, name='masks')
-        self.noises = tf.compat.v1.placeholder(self.dtype, [self.batch_size] + noises_dims, name='noises')
+        self.images = tf.placeholder(self.dtype, [self.batch_size] + image_dims, name='real_images')
+        self.sketches = tf.placeholder(self.dtype, [self.batch_size] + sk_dims, name='sketches')
+        self.color = tf.placeholder(self.dtype, [self.batch_size] + color_dims, name='color')
+        self.masks = tf.placeholder(self.dtype, [self.batch_size] + masks_dims, name='masks')
+        self.noises = tf.placeholder(self.dtype, [self.batch_size] + noises_dims, name='noises')
 
         self.load_demo_graph()
         self.warmup()
@@ -111,7 +102,7 @@ class Model:
         s_h16, s_w16 = int(self.input_size / 16), int(self.input_size / 16)
         s_h32, s_w32 = int(self.input_size / 32), int(self.input_size / 32)
         s_h64, s_w64 = int(self.input_size / 64), int(self.input_size / 64)
-        with tf.compat.v1.variable_scope(name, reuse=reuse):
+        with tf.variable_scope(name, reuse=reuse):
             # encoder
             x_now = x
             x1, mask1 = gate_conv(x, cnum, 7, 2, use_lrn=False, name='gconv1_ds')
@@ -168,18 +159,20 @@ class Model:
         self.demo_output = gen_img * self.masks + input_images
 
     def load_demo_graph(self):
-        sess_config = tf.compat.v1.ConfigProto()
+        sess_config = tf.ConfigProto()
         sess_config.gpu_options.allow_growth = True
-        self.sess = tf.compat.v1.Session(config=sess_config)
+        self.sess = tf.Session(config=sess_config)
         self.build_demo_graph()
-        init_op = tf.compat.v1.global_variables_initializer()
+        init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
-        vars_list = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES)
+        vars_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
         assign_ops = []
-        print(f'Loading model from {self.ckpt_path}...')
+        """
+        get the checkpoint file from the checkpoint directory
+        """
         for var in vars_list:
-            var_value = tf.train.load_variable(self.ckpt_path, var.name)
-            assign_ops.append(tf.compat.v1.assign(var, var_value))
+            var_value = tf.contrib.framework.load_variable(self.ckpt_path, var.name)
+            assign_ops.append(tf.assign(var, var_value))
         self.sess.run(assign_ops)
         print(f'Model loaded from {self.ckpt_path}')
 
@@ -209,8 +202,3 @@ class Model:
             }
         )
         return demo_output
-
-
-if __name__ == '__main__':
-    CONFIG.model.ckpt_path = 'ckpt/SC-FEGAN.ckpt'
-    model = Model()

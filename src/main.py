@@ -18,6 +18,7 @@ from fegan.model import Model
 def get_model():
     return Model()
 
+
 st.sidebar.title(f"Victara AI")
 
 st.title('Show me your face!')
@@ -137,6 +138,3 @@ if bg_image:
         print(output_img.shape)
         cv2.imwrite('output.jpg', output_img)
         st.image(output_img, channels='BGR')
-
-        # st.image(sketch, clamp=True, channels='BGR')
-        # st.image(mask, clamp=True, channels='BGR')
