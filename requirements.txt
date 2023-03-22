@@ -1,5 +1,6 @@
 environ-config
-tensorflow-macos>=2.9.3
+# tensorflow-macos>=2.9.3
+tensorflow>=2.9.3
 opencv-python-headless
 Pillow
 numpy
