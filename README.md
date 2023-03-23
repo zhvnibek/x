@@ -1,5 +1,11 @@
 # BeautyX AI Demo App
 
+### Migration from tf1 to tf2
+- https://www.tensorflow.org/guide/migrate/migrating_checkpoints
+- https://www.tensorflow.org/guide/migrate
+- https://www.tensorflow.org/guide/migrate/model_mapping
+- 
+
 tf compatibility 
 https://www.tensorflow.org/install/source#gpu
 

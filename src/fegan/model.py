@@ -1,4 +1,6 @@
 """
+    Migrated from tf v1 to tf v2: https://www.tensorflow.org/guide/migrate/upgrade
+
     The gate convolution is made with reference to Deepfillv1 (https://github.com/JiahuiYu/generative_inpainting)
 
     https://paperswithcode.com/paper/free-form-image-inpainting-with-gated
@@ -9,8 +11,8 @@
     https://github.com/nipponjo/deepfillv2-pytorch (latest)
 
 
-    Migrated from tf v1 to tf v2: https://www.tensorflow.org/guide/migrate/upgrade
 """
+from functools import lru_cache
 
 import numpy as np
 import tensorflow as tf
@@ -25,51 +27,102 @@ from config import CONFIG
 tf.compat.v1.disable_eager_execution()
 
 
-def gate_conv(x_in, cnum, ksize, stride=1, rate=1, name='conv',
-              padding='SAME', activation='leaky_relu', use_lrn=True):
-    assert padding in ['SYMMETRIC', 'SAME', 'REFELECT']
-    if padding == 'SYMMETRIC' or padding == 'REFELECT':
-        p = int(rate * (ksize - 1) / 2)
-        x = tf.pad(tensor=x_in, paddings=[[0, 0], [p, p], [p, p], [0, 0]], mode=padding)
-        padding = 'VALID'
+def gate_conv(
+        x_in,
+        cnum,
+        ksize,
+        stride=1,
+        rate=1,
+        name='conv',
+        activation='leaky_relu',
+        use_lrn=True
+):
+    """
+    :param x_in: input tensor
+    :param cnum: output channel number
+    :param ksize: kernel size
+    :param stride: stride
+    :param rate: dilation rate, https://arxiv.org/abs/1511.07122
+    :param name: name
+    :param activation: activation function
+    :param use_lrn: use local response normalization
+    :return: output tensor
+    """
     x = tf.compat.v1.layers.conv2d(
-        x_in, cnum, ksize, stride, dilation_rate=rate,
-        activation=None, padding=padding, name=name)
+        x_in,
+        cnum,
+        ksize,
+        stride,
+        dilation_rate=rate,
+        activation=None,
+        padding='same',
+        name=name
+    )
     if use_lrn:
         x = tf.nn.lrn(x, bias=0.00005)
     if activation == 'leaky_relu':
         x = tf.nn.leaky_relu(x)
-
     g = tf.compat.v1.layers.conv2d(
-        x_in, cnum, ksize, stride, dilation_rate=rate,
-        activation=tf.nn.sigmoid, padding=padding, name=name + '_g')
-
+        x_in,
+        cnum,
+        ksize,
+        stride,
+        dilation_rate=rate,
+        activation=tf.nn.sigmoid,
+        padding='same',
+        name=name + '_g'
+    )
     x = tf.multiply(x, g)
     return x, g
 
 
-def gate_deconv(input_, output_shape, k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02, name="deconv"):
+def gate_deconv(
+        input_,
+        output_shape,
+        k_h=5,
+        k_w=5,
+        d_h=2,
+        d_w=2,
+        stddev=0.02,
+        name="deconv"
+):
     with tf.compat.v1.variable_scope(name):
         # filter : [height, width, output_channels, in_channels]
-        w = tf.compat.v1.get_variable('w', [k_h, k_w, output_shape[-1], input_.get_shape()[-1]],
-                                      initializer=tf.compat.v1.random_normal_initializer(stddev=stddev))
+        w = tf.compat.v1.get_variable(
+            'w',
+            [k_h, k_w, output_shape[-1], input_.get_shape()[-1]],
+            initializer=tf.compat.v1.random_normal_initializer(stddev=stddev)
+        )
 
-        deconv = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
-                                        strides=[1, d_h, d_w, 1])
+        deconv = tf.nn.conv2d_transpose(
+            input_,
+            w,
+            output_shape=output_shape,
+            strides=[1, d_h, d_w, 1]
+        )
 
-        biases = tf.compat.v1.get_variable('biases1', [output_shape[-1]],
-                                           initializer=tf.compat.v1.constant_initializer(0.0))
+        biases = tf.compat.v1.get_variable(
+            'biases1',
+            [output_shape[-1]],
+            initializer=tf.compat.v1.constant_initializer(0.0)
+        )
         deconv = tf.reshape(tf.nn.bias_add(deconv, biases), deconv.get_shape())
         deconv = tf.nn.leaky_relu(deconv)
 
-        g = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
-                                   strides=[1, d_h, d_w, 1])
-        b = tf.compat.v1.get_variable('biases2', [output_shape[-1]], initializer=tf.compat.v1.constant_initializer(0.0))
+        g = tf.nn.conv2d_transpose(
+            input_,
+            w,
+            output_shape=output_shape,
+            strides=[1, d_h, d_w, 1]
+        )
+        b = tf.compat.v1.get_variable(
+            'biases2',
+            [output_shape[-1]],
+            initializer=tf.compat.v1.constant_initializer(0.0)
+        )
         g = tf.reshape(tf.nn.bias_add(g, b), deconv.get_shape())
         g = tf.nn.sigmoid(deconv)
-
         deconv = tf.multiply(g, deconv)
-
         return deconv, g
 
 
@@ -103,7 +156,35 @@ class Model:
         self.warmup()
 
     def build_gen(self, x, mask, name='generator', reuse=False):
-        cnum = 64
+        """
+        Generator is based on encoder-decoder architecture like the U-Net
+        and all convolution layers use gated convolution.
+
+        U-Net: https://towardsdatascience.com/unet-line-by-line-explanation-9b191c76baf5
+        Gated Convolution: https://arxiv.org/abs/1806.03589
+
+        Local signal normalization (LRN) is applied after feature map convolution layers excluding other soft gates.
+        LRN is applied to all convolution layers except input and output layers.
+
+        The encoder of our generator receives input tensor of size 512×512×9:
+        - an incomplete RGB channel image with a removed region to be edited,
+        - a binary sketch that describes the structure of removed parts,
+        - an RGB color stroke map,
+        - a binary mask and a noise
+
+        The encoder downsamples input 7 times using 2 stride kernel convolutions,
+        followed by dilated convolutions before upsampling.
+
+        The decoder uses transposed convolutions for upsampling.
+        Then, skip connections were added to allow concatenation with previous layer with the same spatial resolution.
+
+        We used the leaky ReLU activation function after each layer
+        except for the output layer, which uses a tanh function.
+
+        Overall, our generator consists of 16 convolution layers and the output of the network
+        is an RGB image of same size of input (512×512).
+
+        """
         s_h, s_w = self.input_size, self.input_size
         s_h2, s_w2 = int(self.input_size / 2), int(self.input_size / 2)
         s_h4, s_w4 = int(self.input_size / 4), int(self.input_size / 4)
@@ -111,60 +192,73 @@ class Model:
         s_h16, s_w16 = int(self.input_size / 16), int(self.input_size / 16)
         s_h32, s_w32 = int(self.input_size / 32), int(self.input_size / 32)
         s_h64, s_w64 = int(self.input_size / 64), int(self.input_size / 64)
+
+        cnum = 64
+
         with tf.compat.v1.variable_scope(name, reuse=reuse):
             # encoder
             x_now = x
-            x1, mask1 = gate_conv(x, cnum, 7, 2, use_lrn=False, name='gconv1_ds')
-            x2, mask2 = gate_conv(x1, 2 * cnum, 5, 2, name='gconv2_ds')
-            x3, mask3 = gate_conv(x2, 4 * cnum, 5, 2, name='gconv3_ds')
-            x4, mask4 = gate_conv(x3, 8 * cnum, 3, 2, name='gconv4_ds')
-            x5, mask5 = gate_conv(x4, 8 * cnum, 3, 2, name='gconv5_ds')
-            x6, mask6 = gate_conv(x5, 8 * cnum, 3, 2, name='gconv6_ds')
-            x7, mask7 = gate_conv(x6, 8 * cnum, 3, 2, name='gconv7_ds')
+            x1, _ = gate_conv(x, cnum, ksize=7, stride=2, use_lrn=False, name='gconv1_ds')
+            x2, _ = gate_conv(x1, 2 * cnum, ksize=5, stride=2, name='gconv2_ds')
+            x3, _ = gate_conv(x2, 4 * cnum, ksize=5, stride=2, name='gconv3_ds')
+            x4, _ = gate_conv(x3, 8 * cnum, ksize=3, stride=2, name='gconv4_ds')
+            x5, _ = gate_conv(x4, 8 * cnum, ksize=3, stride=2, name='gconv5_ds')
+            x6, _ = gate_conv(x5, 8 * cnum, ksize=3, stride=2, name='gconv6_ds')
+            x7, _ = gate_conv(x6, 8 * cnum, ksize=3, stride=2, name='gconv7_ds')
 
             # dilated conv
-            x7, _ = gate_conv(x7, 8 * cnum, 3, 1, rate=2, name='co_conv1_dlt')
-            x7, _ = gate_conv(x7, 8 * cnum, 3, 1, rate=4, name='co_conv2_dlt')
-            x7, _ = gate_conv(x7, 8 * cnum, 3, 1, rate=8, name='co_conv3_dlt')
-            x7, _ = gate_conv(x7, 8 * cnum, 3, 1, rate=16, name='co_conv4_dlt')
+            x7, _ = gate_conv(x7, 8 * cnum, ksize=3, stride=1, rate=2, name='co_conv1_dlt')
+            x7, _ = gate_conv(x7, 8 * cnum, ksize=3, stride=1, rate=4, name='co_conv2_dlt')
+            x7, _ = gate_conv(x7, 8 * cnum, ksize=3, stride=1, rate=8, name='co_conv3_dlt')
+            x7, _ = gate_conv(x7, 8 * cnum, ksize=3, stride=1, rate=16, name='co_conv4_dlt')
 
             # decoder
-            x8, _ = gate_deconv(x7, [self.batch_size, s_h64, s_w64, 8 * cnum], name='deconv1')
+            x8, _ = gate_deconv(x7, output_shape=[self.batch_size, s_h64, s_w64, 8 * cnum], name='deconv1')
             x8 = tf.concat([x6, x8], axis=3)
-            x8, mask8 = gate_conv(x8, 8 * cnum, 3, 1, name='gconv8')
+            x8, _ = gate_conv(x8, 8 * cnum, ksize=3, stride=1, name='gconv8')
 
-            x9, _ = gate_deconv(x8, [self.batch_size, s_h32, s_w32, 8 * cnum], name='deconv2')
+            x9, _ = gate_deconv(x8, output_shape=[self.batch_size, s_h32, s_w32, 8 * cnum], name='deconv2')
             x9 = tf.concat([x5, x9], axis=3)
-            x9, mask9 = gate_conv(x9, 8 * cnum, 3, 1, name='gconv9')
+            x9, _ = gate_conv(x9, 8 * cnum, ksize=3, stride=1, name='gconv9')
 
-            x10, _ = gate_deconv(x9, [self.batch_size, s_h16, s_w16, 8 * cnum], name='deconv3')
+            x10, _ = gate_deconv(x9, output_shape=[self.batch_size, s_h16, s_w16, 8 * cnum], name='deconv3')
             x10 = tf.concat([x4, x10], axis=3)
-            x10, mask10 = gate_conv(x10, 8 * cnum, 3, 1, name='gconv10')
+            x10, _ = gate_conv(x10, 8 * cnum, ksize=3, stride=1, name='gconv10')
 
-            x11, _ = gate_deconv(x10, [self.batch_size, s_h8, s_w8, 4 * cnum], name='deconv4')
+            x11, _ = gate_deconv(x10, output_shape=[self.batch_size, s_h8, s_w8, 4 * cnum], name='deconv4')
             x11 = tf.concat([x3, x11], axis=3)
-            x11, mask11 = gate_conv(x11, 4 * cnum, 3, 1, name='gconv11')
+            x11, _ = gate_conv(x11, 4 * cnum, ksize=3, stride=1, name='gconv11')
 
-            x12, _ = gate_deconv(x11, [self.batch_size, s_h4, s_w4, 2 * cnum], name='deconv5')
+            x12, _ = gate_deconv(x11, output_shape=[self.batch_size, s_h4, s_w4, 2 * cnum], name='deconv5')
             x12 = tf.concat([x2, x12], axis=3)
-            x12, mask12 = gate_conv(x12, 2 * cnum, 3, 1, name='gconv12')
+            x12, _ = gate_conv(x12, 2 * cnum, ksize=3, stride=1, name='gconv12')
 
-            x13, _ = gate_deconv(x12, [self.batch_size, s_h2, s_w2, cnum], name='deconv6')
+            x13, _ = gate_deconv(x12, output_shape=[self.batch_size, s_h2, s_w2, cnum], name='deconv6')
             x13 = tf.concat([x1, x13], axis=3)
-            x13, mask13 = gate_conv(x13, cnum, 3, 1, name='gconv13')
+            x13, _ = gate_conv(x13, cnum, ksize=3, stride=1, name='gconv13')
 
-            x14, _ = gate_deconv(x13, [self.batch_size, s_h, s_w, 3], name='deconv7')
+            x14, _ = gate_deconv(x13, output_shape=[self.batch_size, s_h, s_w, 3], name='deconv7')
             x14 = tf.concat([x_now, x14], axis=3)
-            x14, mask14 = gate_conv(x14, 3, 3, 1, activation=None, use_lrn=False, name='gconv14')
+            x14, mask14 = gate_conv(x14, 3, ksize=3, stride=1, activation=None, use_lrn=False, name='gconv14')
 
             output = tf.tanh(x14)
 
             return output, mask14
 
     def build_demo_graph(self):
+        """
+        Build the graph for demo
+
+        :return: None
+
+        We replaced the remaining parts of image outside the mask with the input image before applying the loss
+        functions to it. This replacement allows the generator to be trained on the edited region exclusively.
+        """
         input_images = self.images * (1 - self.masks)
         batch_data = tf.concat([input_images, self.sketches, self.color, self.masks, self.noises], axis=3)
+
         gen_img, output_mask = self.build_gen(batch_data, self.masks)
+
         self.demo_output = gen_img * self.masks + input_images
 
     def load_demo_graph(self):
@@ -211,6 +305,11 @@ class Model:
         return demo_output
 
 
+@lru_cache()
+def get_model():
+    return Model()
+
+
 if __name__ == '__main__':
     CONFIG.model.ckpt_path = 'ckpt/SC-FEGAN.ckpt'
-    model = Model()
+    model = get_model()

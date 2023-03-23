@@ -9,15 +9,8 @@ import streamlit as st
 from PIL import Image
 import svgpathtools
 from streamlit_drawable_canvas import st_canvas
-from functools import lru_cache
 
-from fegan.model import Model
-
-
-@lru_cache()
-def get_model():
-    return Model()
-
+from fegan.model import get_model
 
 st.sidebar.title(f"Victara AI")
 
